@@ -14,7 +14,15 @@ app.post('/extract', async (req, res) => {
   let browser = null;
   try {
     browser = await puppeteer.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: [
+        ...chromium.args,
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--single-process'
+      ],
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless
@@ -22,15 +30,20 @@ app.post('/extract', async (req, res) => {
 
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-    
-    // পেজ পুরোপুরি লোড ও স্ক্রিপ্ট এক্সিকিউট হওয়া পর্যন্ত অপেক্ষা
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 35000 });
 
-    // লেজি লোড ইমেজ ও ডাইনামিক ডেটা ট্রিগার করতে স্ক্রোল
-    await page.evaluate(async () => {
-      window.scrollBy(0, 800);
-      await new Promise(r => setTimeout(r, 600));
+    // ⚡ স্পিড অপটিমাইজেশন: ইমেজ, ফন্ট এবং মিডিয়া ফাইল ব্লক করা (শুধু HTML টেক্সট পড়বে)
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const type = req.resourceType();
+      if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
     });
+
+    // বিজ্ঞাপনের জন্য অপেক্ষা না করে সাথে সাথে DOM লোড করবে
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
     const data = await page.evaluate((targetUrl) => {
       const isAN1 = targetUrl.includes('an1.com');
@@ -47,14 +60,14 @@ app.post('/extract', async (req, res) => {
       name = name.replace(/\b(MOD|APK|Unlimited Money|Everything|Free Download|for Android|LiteApks|AN1)\b/gi, '').replace(/[-|•–].*$/, '').trim();
       if (!name) name = "New Mod App";
 
-      // ২. Icon (Lazy-load হ্যান্ডলার)
+      // ২. Icon Link
       let icon = '';
       if (isAN1) {
         const imgEl = document.querySelector('.app_view .img img, .app_spec .img img, .app-img img');
-        if (imgEl) icon = imgEl.getAttribute('data-src') || imgEl.getAttribute('data-original') || imgEl.currentSrc || imgEl.src;
+        if (imgEl) icon = imgEl.getAttribute('data-src') || imgEl.getAttribute('data-original') || imgEl.getAttribute('src');
       } else if (isLiteApks) {
         const imgEl = document.querySelector('.app-icon img, .entry-content img, .flex-shrink-0 img, .post-thumbnail img');
-        if (imgEl) icon = imgEl.getAttribute('data-src') || imgEl.getAttribute('data-lazy-src') || imgEl.currentSrc || imgEl.src;
+        if (imgEl) icon = imgEl.getAttribute('data-src') || imgEl.getAttribute('data-lazy-src') || imgEl.getAttribute('src');
       }
       if (!icon || icon.includes('data:image')) {
         icon = document.querySelector('meta[property="og:image"]')?.content ||
@@ -113,13 +126,9 @@ app.post('/extract', async (req, res) => {
       let downloads = '';
       const text = document.body ? document.body.innerText : '';
       const dlMatch = text.match(/\b([0-9]+(?:\.[0-9]+)?[KkMmBb]\+?|[0-9,]{3,}\+?)\s*(?:Downloads|Installs|скачиваний)/i);
-      if (dlMatch) {
-        downloads = dlMatch[1];
-      } else {
-        downloads = '500K+';
-      }
+      downloads = dlMatch ? dlMatch[1] : '500K+';
 
-      // ৬. Description & Mod Features
+      // ৬. Description
       let description = '';
       if (isAN1) {
         description = document.querySelector('.app_view .description, #description, .text')?.innerText?.trim();
@@ -133,7 +142,7 @@ app.post('/extract', async (req, res) => {
       const screenshots = [];
       const imgElements = document.querySelectorAll('.app_screens img, .screenshots img, .gallery-item img, [class*="screenshot"] img');
       imgElements.forEach(img => {
-        let src = img.getAttribute('data-src') || img.getAttribute('data-original') || img.currentSrc || img.src;
+        let src = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('src');
         if (src && !screenshots.includes(src) && !src.includes('logo') && !src.includes('icon') && !src.includes('data:image')) {
           try {
             screenshots.push(new URL(src, targetUrl).href);
