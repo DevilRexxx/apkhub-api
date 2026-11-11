@@ -10,6 +10,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// সার্ভার চালু রাখার জন্য পিং অ্যান্ডপয়েন্ট
+app.get('/ping', (req, res) => res.send('pong'));
+
 app.post('/extract', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
@@ -22,31 +25,41 @@ app.post('/extract', async (req, res) => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1920,1080'
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--single-process'
       ],
-      defaultViewport: { width: 1920, height: 1080 },
+      defaultViewport: { width: 1280, height: 800 },
       executablePath: await chromium.executablePath(),
       headless: chromium.headless
     });
 
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await page.setExtraHTTPHeaders({
-      'accept-language': 'en-US,en;q=0.9',
-      'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-      'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': '"Windows"'
+
+    // ⚡ স্পিড বুস্টার: অ্যাড ট্র্যাকার ও অপ্রয়োজনীয় মিডিয়া ব্লক করে সেকেন্ডের মধ্যে লোড করা
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      const reqUrl = req.url();
+      if (
+        ['media', 'font'].includes(resourceType) ||
+        reqUrl.includes('google-analytics') ||
+        reqUrl.includes('doubleclick') ||
+        reqUrl.includes('adservice') ||
+        reqUrl.includes('googlesyndication')
+      ) {
+        req.abort();
+      } else {
+        req.continue();
+      }
     });
 
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    });
-
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 4500));
-    await page.evaluate(() => window.scrollBy(0, 1000));
-    await new Promise(r => setTimeout(r, 800));
+    // দ্রুত DOM লোড হওয়া পর্যন্ত অপেক্ষা
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    
+    // ক্লাউডফ্লেয়ার হ্যান্ডশেকের জন্য মাত্র ১.৫ সেকেন্ড বিরতি
+    await new Promise(r => setTimeout(r, 1500));
 
     const data = await page.evaluate((targetUrl) => {
       const isAN1 = targetUrl.includes('an1.com');
@@ -67,7 +80,7 @@ app.post('/extract', async (req, res) => {
         rawTitle = document.querySelector('meta[property="og:title"]')?.content || document.title || '';
       }
 
-      // MOD / PRO / PREMIUM ব্যাজ সনাক্ত করা
+      // MOD / PRO / PREMIUM ব্যাজ
       const badgeList = [];
       const titleLower = rawTitle.toLowerCase();
       const pageLower = rawBodyText.toLowerCase();
@@ -77,16 +90,18 @@ app.post('/extract', async (req, res) => {
       if (titleLower.includes('mod') || badgeList.length === 0) badgeList.push('MOD');
       const modType = Array.from(new Set(badgeList)).join(' • ');
 
-      // ক্লিন নাম (ভার্সন নম্বর ও ট্যাগ বাদ)
+      // ক্লিন নাম: .com, MOD, APK, ভার্সন সম্পূর্ণ মুছে ফেলা
       name = rawTitle
-        .replace(/\b(MOD APK|MOD|APK|Unlimited Money|Everything|Free Download|for Android|LiteApks|AN1)\b/gi, '')
+        .replace(/\b(liteapks\.com|liteapks|an1\.com|an1|\.com)\b/gi, '')
+        .replace(/\b(MOD APK|MOD|APK|Unlimited Money|Everything|Free Download|for Android)\b/gi, '')
         .replace(/\bv?[0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*)\b/gi, '')
         .replace(/\(.*?\)/g, '')
         .replace(/\[.*?\]/g, '')
         .replace(/[-|•–].*$/, '')
         .trim();
 
-      if (!name || name.toLowerCase().includes('just a moment')) {
+      // যদি নাম ফাঁকা থাকে বা ভুল আসে, সরাসরি URL স্লাগ থেকে ক্লিন নাম নেওয়া
+      if (!name || name === '.com' || name.length < 2 || name.toLowerCase().includes('just a moment')) {
         try {
           const seg = new URL(targetUrl).pathname.split('/').filter(Boolean).pop() || '';
           name = seg.replace(/^[0-9]+-/, '').replace(/(-mod|\.html|\.apk)/gi, '').replace(/[-_]/g, ' ').trim();
@@ -94,9 +109,8 @@ app.post('/extract', async (req, res) => {
         } catch(e) {}
       }
 
-      // ================= ২. DEVELOPER NAME =================
+      // ================= ২. DEVELOPER =================
       let developer = '';
-      // LiteApks-এ H1 এর ঠিক নিচে ডেভেলপারের নাম থাকে
       const devAnchor = document.querySelector('a[href*="/developer/"], a[href*="/author/"], a[href*="/dev/"], .app-author');
       if (devAnchor && devAnchor.innerText?.trim()) {
         developer = devAnchor.innerText.trim();
@@ -105,7 +119,6 @@ app.post('/extract', async (req, res) => {
         if (devEl) developer = devEl.innerText?.trim();
       }
 
-      // যদি ট্যাগে না পায়, টেক্সট প্যাটার্ন দিয়ে খোঁজা
       if (!developer) {
         const devM = rawBodyText.match(/(?:Developer|Offered by|Разработчик)[:\s]*([A-Za-z0-9\s.,&'-]+)/i);
         if (devM && devM[1].trim().length < 40) developer = devM[1].trim();
@@ -114,10 +127,8 @@ app.post('/extract', async (req, res) => {
 
       // ================= ৩. CATEGORY =================
       let category = '';
-      // LiteApks ও AN1 ব্রেডক্রাম্ব: Home > Apps/Games > [CATEGORY] > AppName
       const crumbs = Array.from(document.querySelectorAll('.breadcrumb a, nav[class*="bread"] a, .breadcrumbs li a, .breadcrumbs a, [class*="crumb"] a'));
       if (crumbs.length >= 3) {
-        // সাধারণত শেষের আগের লিঙ্কটি আসল ক্যাটাগরি
         category = crumbs[crumbs.length - 2]?.innerText?.trim();
       } else if (crumbs.length === 2) {
         category = crumbs[1]?.innerText?.trim();
@@ -134,22 +145,19 @@ app.post('/extract', async (req, res) => {
       }
       if (!category) category = 'Action & Strategy';
 
-      // ================= ৪. LITEAPKS স্ট্যাটাস গ্রিড থেকে VERSION ও SIZE =================
+      // ================= ৪. VERSION & SIZE =================
       let version = '';
       let size = '';
 
-      // ক. LiteApks এর গ্রিড বক্স সরাসরি স্ক্যান (যেখানে সংখ্যার নিচে Version / Size লেখা থাকে)
       const allDivs = Array.from(document.querySelectorAll('div, li, tr'));
       for (const el of allDivs) {
         const text = el.innerText?.trim() || '';
         
-        // Version গ্রিড সেল
         if (!version && /\bversion\b/i.test(text) && text.length < 50) {
           const vm = text.match(/([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))/);
           if (vm) version = vm[1].trim();
         }
 
-        // Size গ্রিড সেল (যেমন: "200M" বা "140 MB")
         if (!size && /\bsize\b/i.test(text) && text.length < 50) {
           const sm = text.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
           if (sm) {
@@ -161,7 +169,6 @@ app.post('/extract', async (req, res) => {
         }
       }
 
-      // খ. যদি গ্রিডে না পায়, রেগুলার টেক্সট স্ক্যান
       if (!version) {
         const vMatch = rawBodyText.match(/\b(?:v|Version)[:\s]*([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))\b/i);
         version = vMatch ? vMatch[1].trim() : '1.0.0';
@@ -169,7 +176,6 @@ app.post('/extract', async (req, res) => {
       version = version.startsWith('v') ? version : `v${version}`;
 
       if (!size) {
-        // ডাউনলোড বাটনের সাইজ (যেমন "Download APK (200MB)")
         const dlBtns = Array.from(document.querySelectorAll('a[href*="/download"], a.download_button, a.btn-download'));
         for (const btn of dlBtns) {
           const m = (btn.innerText || '').match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
@@ -195,7 +201,7 @@ app.post('/extract', async (req, res) => {
         }
       }
 
-      // ================= ৫. LAST UPDATE DATE =================
+      // ================= ৫. LAST UPDATE =================
       let lastUpdated = '';
       const dateEl = document.querySelector('time, [itemprop="dateModified"], [itemprop="datePublished"], .updated, .last-update, [class*="date"]');
       if (dateEl) {
@@ -212,7 +218,7 @@ app.post('/extract', async (req, res) => {
         lastUpdated = today.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
       }
 
-      // ================= ৬. STAR RATING =================
+      // ================= ৬. RATING =================
       let rating = '';
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const s of scripts) {
@@ -238,7 +244,7 @@ app.post('/extract', async (req, res) => {
       let numRating = parseFloat(rating);
       rating = (!isNaN(numRating) && numRating >= 1 && numRating <= 5) ? numRating.toFixed(1) : '4.5';
 
-      // ================= ৭. APP ICON =================
+      // ================= ৭. ICON =================
       let icon = '';
       if (isLiteApks) {
         const iconEl = document.querySelector('.app-icon img, .flex-shrink-0 img, .post-thumbnail img, [class*="icon"] img');
@@ -304,7 +310,7 @@ app.post('/extract', async (req, res) => {
       }
 
       return {
-        name,
+        name: name || 'Extracted Mod App',
         modType,
         developer,
         category,
