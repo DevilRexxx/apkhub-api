@@ -24,10 +24,11 @@ app.post('/extract', async (req, res) => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1920,1080'
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--single-process'
       ],
-      defaultViewport: { width: 1920, height: 1080 },
+      defaultViewport: { width: 1280, height: 800 },
       executablePath: await chromium.executablePath(),
       headless: chromium.headless
     });
@@ -45,47 +46,51 @@ app.post('/extract', async (req, res) => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
 
-    // ক্লাউডফ্লেয়ার চ্যালেঞ্জ ও পেজ লোডের জন্য পূর্ণ লোডিং
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    // ফাস্ট লোডিং
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
     
-    // ক্লাউডফ্লেয়ার পার হতে ৩.৫ সেকেন্ড অপেক্ষা
-    await new Promise(r => setTimeout(r, 3500));
-
-    // লেজি-লোডিং ইমেজ ও স্ক্রিনশট ট্রিগার করতে স্ক্রোল ডাউন
-    await page.evaluate(() => window.scrollBy(0, 1200));
-    await new Promise(r => setTimeout(r, 1000));
+    // পেজ রেন্ডার ও চ্যালেঞ্জ পার হওয়ার জন্য ব্যালেন্সড ৩ সেকেন্ড
+    await new Promise(r => setTimeout(r, 3000));
 
     const data = await page.evaluate((targetUrl) => {
       const isAN1 = targetUrl.includes('an1.com');
       const isLiteApks = targetUrl.includes('liteapks.com');
-      const rawBodyText = document.body ? document.body.innerText : '';
+      const bodyText = document.body ? document.body.innerText : '';
 
-      // ================= ১. APP NAME & MOD BADGE =================
-      let name = '';
-      let rawTitle = '';
-      if (isLiteApks) {
-        const h1 = document.querySelector('h1.entry-title, h1.text-2xl, h1.font-bold, h1');
-        if (h1 && !h1.innerText.includes('Just a moment')) rawTitle = h1.innerText?.trim();
-      } else if (isAN1) {
-        rawTitle = document.querySelector('.app_name, h1.title, h1[itemprop="headline"]')?.innerText?.trim() || '';
+      // ================= ১. JSON-LD SCHEMA থেকে নিখুঁত ডেটা সংগ্রহ =================
+      let schemaData = {};
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const s of scripts) {
+        try {
+          const parsed = JSON.parse(s.innerText);
+          if (parsed['@type'] === 'SoftwareApplication' || parsed.applicationCategory) {
+            schemaData = parsed;
+            break;
+          }
+          if (Array.isArray(parsed)) {
+            const found = parsed.find(item => item['@type'] === 'SoftwareApplication' || item.applicationCategory);
+            if (found) { schemaData = found; break; }
+          }
+        } catch(e) {}
       }
 
-      if (!rawTitle || rawTitle.includes('Just a moment')) {
-        rawTitle = document.querySelector('meta[property="og:title"]')?.content || document.title || '';
+      // ================= ২. APP NAME =================
+      let name = schemaData.name || '';
+      if (!name) {
+        if (isLiteApks) {
+          const h1 = document.querySelector('h1.entry-title, h1.text-2xl, h1.font-bold, h1');
+          if (h1 && !h1.innerText.includes('Just a moment')) name = h1.innerText?.trim();
+        } else if (isAN1) {
+          name = document.querySelector('.app_name, h1.title, h1[itemprop="headline"]')?.innerText?.trim();
+        }
       }
 
-      // MOD / PRO / PREMIUM ব্যাজ
-      const badgeList = [];
-      const titleLower = rawTitle.toLowerCase();
-      const pageLower = rawBodyText.toLowerCase();
-
-      if (titleLower.includes('premium') || pageLower.includes('premium unlocked')) badgeList.push('PREMIUM');
-      if (titleLower.includes('pro') || pageLower.includes('pro unlocked')) badgeList.push('PRO');
-      if (titleLower.includes('mod') || badgeList.length === 0) badgeList.push('MOD');
-      const modType = Array.from(new Set(badgeList)).join(' • ');
+      if (!name || name.includes('Just a moment')) {
+        name = document.querySelector('meta[property="og:title"]')?.content || document.title || '';
+      }
 
       // ক্লিন নাম
-      name = rawTitle
+      name = name
         .replace(/\b(liteapks\.com|liteapks|an1\.com|an1|\.com)\b/gi, '')
         .replace(/\b(MOD APK|MOD|APK|Unlimited Money|Everything|Free Download|for Android)\b/gi, '')
         .replace(/\bv?[0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*)\b/gi, '')
@@ -94,7 +99,7 @@ app.post('/extract', async (req, res) => {
         .replace(/[-|•–].*$/, '')
         .trim();
 
-      if (!name || name === '.com' || name.length < 2 || name.toLowerCase().includes('just a moment')) {
+      if (!name || name.length < 2 || name.toLowerCase().includes('just a moment')) {
         try {
           const seg = new URL(targetUrl).pathname.split('/').filter(Boolean).pop() || '';
           name = seg.replace(/^[0-9]+-/, '').replace(/(-mod|\.html|\.apk)/gi, '').replace(/[-_]/g, ' ').trim();
@@ -102,31 +107,27 @@ app.post('/extract', async (req, res) => {
         } catch(e) {}
       }
 
-      // ================= ২. APP ICON (গ্যারান্টিড ইমেজ পার্সিং) =================
+      // ================= ৩. MOD TYPE BADGE =================
+      const badgeList = [];
+      const titleLower = (document.title || '').toLowerCase();
+      const pageLower = bodyText.toLowerCase();
+
+      if (titleLower.includes('premium') || pageLower.includes('premium unlocked')) badgeList.push('PREMIUM');
+      if (titleLower.includes('pro') || pageLower.includes('pro unlocked')) badgeList.push('PRO');
+      if (titleLower.includes('mod') || badgeList.length === 0) badgeList.push('MOD');
+      const modType = Array.from(new Set(badgeList)).join(' • ');
+
+      // ================= ৪. APP ICON =================
       let icon = '';
-
-      // ক. সরাসরি LiteApks ও AN1 নির্দিষ্ট আইকন কনটেইনার
-      const iconSelectors = [
-        '.app-icon img',
-        '.post-thumbnail img',
-        '.flex-shrink-0 img',
-        '[class*="icon"] img',
-        '.app_view .img img',
-        '.app_spec .img img'
-      ];
-
-      for (const sel of iconSelectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          const src = el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || el.getAttribute('src');
-          if (src && !src.includes('data:image') && !src.includes('default') && src.length > 10) {
-            icon = src;
-            break;
-          }
-        }
+      if (schemaData.image) {
+        icon = typeof schemaData.image === 'string' ? schemaData.image : (schemaData.image.url || '');
       }
 
-      // খ. মেটা ট্যাগ ব্যাকআপ (og:image সবসময় হাই-রেজোলিউশন আসল আইকন দেয়)
+      if (!icon) {
+        const iconEl = document.querySelector('.app-icon img, .flex-shrink-0 img, .post-thumbnail img, [class*="icon"] img, .app_view .img img');
+        if (iconEl) icon = iconEl.getAttribute('data-src') || iconEl.getAttribute('data-lazy-src') || iconEl.getAttribute('src');
+      }
+
       if (!icon || icon.includes('data:image')) {
         icon = document.querySelector('meta[property="og:image"]')?.content ||
                document.querySelector('meta[name="twitter:image"]')?.content ||
@@ -137,107 +138,24 @@ app.post('/extract', async (req, res) => {
         try { icon = new URL(icon, targetUrl).href; } catch(e) {}
       }
 
-      // ================= ৩. PREVIEW SCREENSHOTS =================
-      const screenshots = [];
-      const imgElements = document.querySelectorAll('.app_screens img, .screenshots img, .gallery img, [class*="screenshot"] img, [class*="screen"] img, [class*="gallery"] img, .swiper-slide img');
+      // ================= ৫. VERSION & SIZE =================
+      let version = schemaData.softwareVersion || '';
+      let size = schemaData.fileSize || '';
 
-      imgElements.forEach(img => {
-        let src = img.getAttribute('data-src') || 
-                  img.getAttribute('data-lazy-src') || 
-                  img.getAttribute('data-original') || 
-                  img.getAttribute('srcset')?.split(' ')[0] || 
-                  img.getAttribute('src');
-
-        if (src && !src.includes('data:image') && !src.includes('logo') && !src.includes('icon') && !screenshots.includes(src)) {
-          try {
-            const absoluteUrl = new URL(src, targetUrl).href;
-            if (!screenshots.includes(absoluteUrl)) {
-              screenshots.push(absoluteUrl);
-            }
-          } catch(e) {}
-        }
-      });
-
-      // ================= ৪. DESCRIPTION & MOD FEATURES =================
-      let description = '';
-
-      // ক. আর্টিকেলের মূল প্যারাগ্রাফগুলো
-      const contentBox = document.querySelector('.entry-content, article, .post-content, #description, .app_view .description, .text');
-      if (contentBox) {
-        const clone = contentBox.cloneNode(true);
-        // অপ্রয়োজনীয় এলিমেন্ট বাদ দেওয়া
-        clone.querySelectorAll('script, style, ins, .adsbygoogle, .download-btn, form, iframe').forEach(el => el.remove());
+      // DOM থেকে Version ও Size
+      const allTextBlocks = Array.from(document.querySelectorAll('tr, li, div, .spec-item'));
+      for (const el of allTextBlocks) {
+        const txt = el.innerText?.trim() || '';
         
-        const lines = [];
-        const elements = clone.querySelectorAll('p, li, h2, h3');
-        elements.forEach(el => {
-          const txt = el.innerText?.trim();
-          if (txt && txt.length > 5 && !txt.includes('LiteApks') && !txt.includes('Download APK') && !txt.includes('Leave a Reply')) {
-            lines.push(txt);
-          }
-        });
-
-        if (lines.length > 0) {
-          description = lines.slice(0, 12).join('\n\n');
-        } else {
-          description = clone.innerText?.trim();
-        }
-      }
-
-      // খ. ব্যাকআপ মেটা ডেসক্রিপশন
-      if (!description || description.length < 30) {
-        description = document.querySelector('meta[property="og:description"]')?.content ||
-                      document.querySelector('meta[name="description"]')?.content || '';
-      }
-
-      description = description.replace(/[ \t]+/g, ' ').slice(0, 2000);
-
-      // ================= ৫. DEVELOPER =================
-      let developer = '';
-      const devAnchor = document.querySelector('a[href*="/developer/"], a[href*="/author/"], a[href*="/dev/"], .app-author');
-      if (devAnchor && devAnchor.innerText?.trim()) {
-        developer = devAnchor.innerText.trim();
-      } else {
-        const devEl = document.querySelector('.developer, [itemprop="author"], [itemprop="publisher"], .app_spec .dev');
-        if (devEl) developer = devEl.innerText?.trim();
-      }
-
-      if (!developer) {
-        const devM = rawBodyText.match(/(?:Developer|Offered by|Разработчик)[:\s]*([A-Za-z0-9\s.,&'-]+)/i);
-        if (devM && devM[1].trim().length < 40) developer = devM[1].trim();
-      }
-      if (!developer) developer = 'Jafa Studios';
-
-      // ================= ৬. CATEGORY =================
-      let category = '';
-      const crumbs = Array.from(document.querySelectorAll('.breadcrumb a, nav[class*="bread"] a, .breadcrumbs li a, .breadcrumbs a, [class*="crumb"] a'));
-      if (crumbs.length >= 3) {
-        category = crumbs[crumbs.length - 2]?.innerText?.trim();
-      } else if (crumbs.length === 2) {
-        category = crumbs[1]?.innerText?.trim();
-      }
-
-      if (!category || ['home', 'apps', 'games'].includes(category.toLowerCase())) {
-        const catM = rawBodyText.match(/(?:Category|Genre|Категория)[:\s]*([A-Za-z &]+)/i);
-        if (catM) category = catM[1].trim();
-      }
-      if (!category) category = 'Strategy';
-
-      // ================= ৭. VERSION & SIZE =================
-      let version = '';
-      let size = '';
-
-      const allDivs = Array.from(document.querySelectorAll('div, li, tr'));
-      for (const el of allDivs) {
-        const text = el.innerText?.trim() || '';
-        
-        if (!version && /\bversion\b/i.test(text) && text.length < 50) {
-          const vm = text.match(/([0-9]+(?:\.[0-9]+)*(?:[a-zA-Z0-9.-]*))/);
+        // Version
+        if (!version && /\b(version|версия)\b/i.test(txt) && txt.length < 40) {
+          const vm = txt.match(/([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))/);
           if (vm) version = vm[1].trim();
         }
 
-        if (!size && /\bsize\b/i.test(text) && text.length < 50) {
-          const sm = text.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
+        // Size
+        if (!size && /\b(size|размер)\b/i.test(txt) && txt.length < 40) {
+          const sm = txt.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
           if (sm) {
             let sVal = sm[1].toUpperCase();
             if (sVal.endsWith('M')) sVal += 'B';
@@ -248,78 +166,120 @@ app.post('/extract', async (req, res) => {
       }
 
       if (!version) {
-        const vMatch = rawBodyText.match(/\b(?:v|Version)[:\s]*([0-9]+(?:\.[0-9]+)*(?:[a-zA-Z0-9.-]*))\b/i);
-        version = vMatch ? vMatch[1].trim() : '3';
+        const vMatch = bodyText.match(/\b(?:v|Version)[:\s]*([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))\b/i);
+        version = vMatch ? vMatch[1].trim() : '1.0.0';
       }
       version = version.startsWith('v') ? version : `v${version}`;
 
       if (!size) {
-        const sm = rawBodyText.match(/\bSize[:\s]*([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i) ||
-                   rawBodyText.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB))\b/i);
+        const sm = bodyText.match(/\bSize[:\s]*([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i) ||
+                   bodyText.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB))\b/i);
         if (sm) {
           let sVal = sm[1].toUpperCase();
           if (sVal.endsWith('M')) sVal += 'B';
           if (sVal.endsWith('G')) sVal += 'B';
           size = sVal;
         } else {
-          size = '00 MB';
+          size = '95 MB';
         }
       }
 
-      // ================= ৮. LAST UPDATE & RATING =================
-      let lastUpdated = '';
-      const dateEl = document.querySelector('time, [itemprop="dateModified"], [itemprop="datePublished"], .updated, .last-update, [class*="date"]');
-      if (dateEl) lastUpdated = dateEl.getAttribute('datetime') || dateEl.innerText?.trim();
-
-      if (!lastUpdated) {
-        const updateMatch = rawBodyText.match(/(?:Updated|Last Update|Update date|Обновлено)[:\s]*([A-Za-z]+ \d{1,2},? \d{4}|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}-\d{2}-\d{2})/i);
-        if (updateMatch) lastUpdated = updateMatch[1].trim();
+      // ================= ৬. DEVELOPER & CATEGORY =================
+      let developer = '';
+      if (schemaData.author && schemaData.author.name) {
+        developer = schemaData.author.name;
       }
-      if (!lastUpdated || lastUpdated.length > 25) {
-        const today = new Date();
-        lastUpdated = today.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      if (!developer) {
+        const devEl = document.querySelector('a[href*="/developer/"], a[href*="/author/"], .app-author, .developer, [itemprop="publisher"]');
+        if (devEl) developer = devEl.innerText?.trim();
       }
+      if (!developer) {
+        const devM = bodyText.match(/(?:Developer|Offered by)[:\s]*([A-Za-z0-9\s.,&'-]+)/i);
+        if (devM && devM[1].trim().length < 35) developer = devM[1].trim();
+      }
+      if (!developer) developer = 'Verified Studio';
 
+      let category = schemaData.applicationCategory || '';
+      if (!category) {
+        const crumbs = Array.from(document.querySelectorAll('.breadcrumb a, nav[class*="bread"] a, .breadcrumbs a'));
+        if (crumbs.length >= 2) category = crumbs[crumbs.length - 2]?.innerText?.trim();
+      }
+      if (!category || ['home', 'apps', 'games'].includes(category.toLowerCase())) {
+        const catM = bodyText.match(/(?:Category|Genre)[:\s]*([A-Za-z &]+)/i);
+        if (catM) category = catM[1].trim();
+      }
+      if (!category) category = 'Action Games';
+
+      // ================= ৭. STAR RATING =================
       let rating = '';
-      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-      for (const s of scripts) {
-        try {
-          const json = JSON.parse(s.innerText);
-          if (json.aggregateRating && json.aggregateRating.ratingValue) {
-            rating = json.aggregateRating.ratingValue.toString();
-            break;
-          }
-        } catch(e) {}
+      if (schemaData.aggregateRating && schemaData.aggregateRating.ratingValue) {
+        rating = schemaData.aggregateRating.ratingValue.toString();
       }
-
       if (!rating) {
         const rEl = document.querySelector('.post-ratings strong, .rating-value, span[itemprop="ratingValue"], .rating_num');
         if (rEl) rating = rEl.innerText?.trim();
       }
-
-      let numRating = parseFloat(rating);
-      rating = (!isNaN(numRating) && numRating >= 1 && numRating <= 5) ? numRating.toFixed(1) : '5.0';
-
-      // ================= ৯. DOWNLOAD LINK =================
-      let downloadUrl = targetUrl;
-      const dlAnchor = document.querySelector('a[href*="/download"], a.download_button, a.btn-download, a[class*="download"]');
-      if (dlAnchor && dlAnchor.href) {
-        downloadUrl = dlAnchor.href;
+      if (!rating) {
+        const m = bodyText.match(/\b([3-5]\.[0-9])\s*(?:\/|out of|\★|stars)?/i);
+        if (m) rating = m[1];
       }
+      let numRating = parseFloat(rating);
+      rating = (!isNaN(numRating) && numRating >= 1 && numRating <= 5) ? numRating.toFixed(1) : '4.8';
+
+      // ================= ৮. SCREENSHOTS =================
+      const screenshots = [];
+      const imgElements = document.querySelectorAll('.app_screens img, .screenshots img, .gallery img, [class*="screenshot"] img, [class*="screen"] img');
+      imgElements.forEach(img => {
+        let src = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('src');
+        if (src && !src.includes('data:image') && !src.includes('logo') && !src.includes('icon')) {
+          try {
+            const abs = new URL(src, targetUrl).href;
+            if (!screenshots.includes(abs)) screenshots.push(abs);
+          } catch(e) {}
+        }
+      });
+
+      // ================= ৯. DESCRIPTION =================
+      let description = '';
+      const contentBox = document.querySelector('.entry-content, article, .post-content, #description, .app_view .description');
+      if (contentBox) {
+        const clone = contentBox.cloneNode(true);
+        clone.querySelectorAll('script, style, ins, .adsbygoogle, .download-btn, form').forEach(el => el.remove());
+        const lines = [];
+        clone.querySelectorAll('p, li, h2, h3').forEach(el => {
+          const txt = el.innerText?.trim();
+          if (txt && txt.length > 8 && !txt.includes('LiteApks') && !txt.includes('Download APK')) {
+            lines.push(txt);
+          }
+        });
+        description = lines.length > 0 ? lines.slice(0, 10).join('\n\n') : clone.innerText?.trim();
+      }
+
+      if (!description || description.length < 20) {
+        description = document.querySelector('meta[property="og:description"]')?.content ||
+                      document.querySelector('meta[name="description"]')?.content ||
+                      'Enjoy clean verified Android gameplay with unlocked exclusive features and full package installation.';
+      }
+
+      // ================= ১০. DOWNLOAD LINK =================
+      let downloadUrl = targetUrl;
+      const dlAnchor = document.querySelector('a[href*="/download"], a.download_button, a.btn-download');
+      if (dlAnchor && dlAnchor.href) downloadUrl = dlAnchor.href;
 
       return {
         name,
         modType,
         developer,
         category,
-        lastUpdated,
+        lastUpdated: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
         version,
         size,
         rating,
-        downloads: '50K+',
+        downloads: '100K+',
         icon: icon || 'https://upload.wikimedia.org/wikipedia/commons/d/d7/Android_robot.svg',
-        description,
+        description: description.replace(/[ \t]+/g, ' ').slice(0, 1500),
         download: downloadUrl,
+        downloadUrl,
         screenshots: screenshots.slice(0, 6)
       };
     }, url);
