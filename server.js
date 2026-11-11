@@ -10,7 +10,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// সার্ভার চালু রাখার জন্য পিং অ্যান্ডপয়েন্ট
 app.get('/ping', (req, res) => res.send('pong'));
 
 app.post('/extract', async (req, res) => {
@@ -25,41 +24,36 @@ app.post('/extract', async (req, res) => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--single-process'
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1920,1080'
       ],
-      defaultViewport: { width: 1280, height: 800 },
+      defaultViewport: { width: 1920, height: 1080 },
       executablePath: await chromium.executablePath(),
       headless: chromium.headless
     });
 
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-
-    // ⚡ স্পিড বুস্টার: অ্যাড ট্র্যাকার ও অপ্রয়োজনীয় মিডিয়া ব্লক করে সেকেন্ডের মধ্যে লোড করা
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      const reqUrl = req.url();
-      if (
-        ['media', 'font'].includes(resourceType) ||
-        reqUrl.includes('google-analytics') ||
-        reqUrl.includes('doubleclick') ||
-        reqUrl.includes('adservice') ||
-        reqUrl.includes('googlesyndication')
-      ) {
-        req.abort();
-      } else {
-        req.continue();
-      }
+    await page.setExtraHTTPHeaders({
+      'accept-language': 'en-US,en;q=0.9',
+      'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"'
     });
 
-    // দ্রুত DOM লোড হওয়া পর্যন্ত অপেক্ষা
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
+
+    // ক্লাউডফ্লেয়ার চ্যালেঞ্জ ও পেজ লোডের জন্য পূর্ণ লোডিং
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
     
-    // ক্লাউডফ্লেয়ার হ্যান্ডশেকের জন্য মাত্র ১.৫ সেকেন্ড বিরতি
-    await new Promise(r => setTimeout(r, 1500));
+    // ক্লাউডফ্লেয়ার পার হতে ৩.৫ সেকেন্ড অপেক্ষা
+    await new Promise(r => setTimeout(r, 3500));
+
+    // লেজি-লোডিং ইমেজ ও স্ক্রিনশট ট্রিগার করতে স্ক্রোল ডাউন
+    await page.evaluate(() => window.scrollBy(0, 1200));
+    await new Promise(r => setTimeout(r, 1000));
 
     const data = await page.evaluate((targetUrl) => {
       const isAN1 = targetUrl.includes('an1.com');
@@ -90,7 +84,7 @@ app.post('/extract', async (req, res) => {
       if (titleLower.includes('mod') || badgeList.length === 0) badgeList.push('MOD');
       const modType = Array.from(new Set(badgeList)).join(' • ');
 
-      // ক্লিন নাম: .com, MOD, APK, ভার্সন সম্পূর্ণ মুছে ফেলা
+      // ক্লিন নাম
       name = rawTitle
         .replace(/\b(liteapks\.com|liteapks|an1\.com|an1|\.com)\b/gi, '')
         .replace(/\b(MOD APK|MOD|APK|Unlimited Money|Everything|Free Download|for Android)\b/gi, '')
@@ -100,7 +94,6 @@ app.post('/extract', async (req, res) => {
         .replace(/[-|•–].*$/, '')
         .trim();
 
-      // যদি নাম ফাঁকা থাকে বা ভুল আসে, সরাসরি URL স্লাগ থেকে ক্লিন নাম নেওয়া
       if (!name || name === '.com' || name.length < 2 || name.toLowerCase().includes('just a moment')) {
         try {
           const seg = new URL(targetUrl).pathname.split('/').filter(Boolean).pop() || '';
@@ -109,7 +102,97 @@ app.post('/extract', async (req, res) => {
         } catch(e) {}
       }
 
-      // ================= ২. DEVELOPER =================
+      // ================= ২. APP ICON (গ্যারান্টিড ইমেজ পার্সিং) =================
+      let icon = '';
+
+      // ক. সরাসরি LiteApks ও AN1 নির্দিষ্ট আইকন কনটেইনার
+      const iconSelectors = [
+        '.app-icon img',
+        '.post-thumbnail img',
+        '.flex-shrink-0 img',
+        '[class*="icon"] img',
+        '.app_view .img img',
+        '.app_spec .img img'
+      ];
+
+      for (const sel of iconSelectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const src = el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || el.getAttribute('src');
+          if (src && !src.includes('data:image') && !src.includes('default') && src.length > 10) {
+            icon = src;
+            break;
+          }
+        }
+      }
+
+      // খ. মেটা ট্যাগ ব্যাকআপ (og:image সবসময় হাই-রেজোলিউশন আসল আইকন দেয়)
+      if (!icon || icon.includes('data:image')) {
+        icon = document.querySelector('meta[property="og:image"]')?.content ||
+               document.querySelector('meta[name="twitter:image"]')?.content ||
+               document.querySelector('link[rel="apple-touch-icon"]')?.href || '';
+      }
+
+      if (icon && !icon.startsWith('http')) {
+        try { icon = new URL(icon, targetUrl).href; } catch(e) {}
+      }
+
+      // ================= ৩. PREVIEW SCREENSHOTS =================
+      const screenshots = [];
+      const imgElements = document.querySelectorAll('.app_screens img, .screenshots img, .gallery img, [class*="screenshot"] img, [class*="screen"] img, [class*="gallery"] img, .swiper-slide img');
+
+      imgElements.forEach(img => {
+        let src = img.getAttribute('data-src') || 
+                  img.getAttribute('data-lazy-src') || 
+                  img.getAttribute('data-original') || 
+                  img.getAttribute('srcset')?.split(' ')[0] || 
+                  img.getAttribute('src');
+
+        if (src && !src.includes('data:image') && !src.includes('logo') && !src.includes('icon') && !screenshots.includes(src)) {
+          try {
+            const absoluteUrl = new URL(src, targetUrl).href;
+            if (!screenshots.includes(absoluteUrl)) {
+              screenshots.push(absoluteUrl);
+            }
+          } catch(e) {}
+        }
+      });
+
+      // ================= ৪. DESCRIPTION & MOD FEATURES =================
+      let description = '';
+
+      // ক. আর্টিকেলের মূল প্যারাগ্রাফগুলো
+      const contentBox = document.querySelector('.entry-content, article, .post-content, #description, .app_view .description, .text');
+      if (contentBox) {
+        const clone = contentBox.cloneNode(true);
+        // অপ্রয়োজনীয় এলিমেন্ট বাদ দেওয়া
+        clone.querySelectorAll('script, style, ins, .adsbygoogle, .download-btn, form, iframe').forEach(el => el.remove());
+        
+        const lines = [];
+        const elements = clone.querySelectorAll('p, li, h2, h3');
+        elements.forEach(el => {
+          const txt = el.innerText?.trim();
+          if (txt && txt.length > 5 && !txt.includes('LiteApks') && !txt.includes('Download APK') && !txt.includes('Leave a Reply')) {
+            lines.push(txt);
+          }
+        });
+
+        if (lines.length > 0) {
+          description = lines.slice(0, 12).join('\n\n');
+        } else {
+          description = clone.innerText?.trim();
+        }
+      }
+
+      // খ. ব্যাকআপ মেটা ডেসক্রিপশন
+      if (!description || description.length < 30) {
+        description = document.querySelector('meta[property="og:description"]')?.content ||
+                      document.querySelector('meta[name="description"]')?.content || '';
+      }
+
+      description = description.replace(/[ \t]+/g, ' ').slice(0, 2000);
+
+      // ================= ৫. DEVELOPER =================
       let developer = '';
       const devAnchor = document.querySelector('a[href*="/developer/"], a[href*="/author/"], a[href*="/dev/"], .app-author');
       if (devAnchor && devAnchor.innerText?.trim()) {
@@ -123,9 +206,9 @@ app.post('/extract', async (req, res) => {
         const devM = rawBodyText.match(/(?:Developer|Offered by|Разработчик)[:\s]*([A-Za-z0-9\s.,&'-]+)/i);
         if (devM && devM[1].trim().length < 40) developer = devM[1].trim();
       }
-      if (!developer) developer = 'Top Android Studio';
+      if (!developer) developer = 'Jafa Studios';
 
-      // ================= ৩. CATEGORY =================
+      // ================= ৬. CATEGORY =================
       let category = '';
       const crumbs = Array.from(document.querySelectorAll('.breadcrumb a, nav[class*="bread"] a, .breadcrumbs li a, .breadcrumbs a, [class*="crumb"] a'));
       if (crumbs.length >= 3) {
@@ -135,17 +218,12 @@ app.post('/extract', async (req, res) => {
       }
 
       if (!category || ['home', 'apps', 'games'].includes(category.toLowerCase())) {
-        const catLink = document.querySelector('a[href*="/category/"], a[href*="/genre/"], a[href*="/apps/"]:not([href$="/apps/"])');
-        if (catLink) category = catLink.innerText?.trim();
-      }
-
-      if (!category || ['home', 'apps', 'games'].includes(category.toLowerCase())) {
         const catM = rawBodyText.match(/(?:Category|Genre|Категория)[:\s]*([A-Za-z &]+)/i);
         if (catM) category = catM[1].trim();
       }
-      if (!category) category = 'Action & Strategy';
+      if (!category) category = 'Strategy';
 
-      // ================= ৪. VERSION & SIZE =================
+      // ================= ৭. VERSION & SIZE =================
       let version = '';
       let size = '';
 
@@ -154,7 +232,7 @@ app.post('/extract', async (req, res) => {
         const text = el.innerText?.trim() || '';
         
         if (!version && /\bversion\b/i.test(text) && text.length < 50) {
-          const vm = text.match(/([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))/);
+          const vm = text.match(/([0-9]+(?:\.[0-9]+)*(?:[a-zA-Z0-9.-]*))/);
           if (vm) version = vm[1].trim();
         }
 
@@ -170,55 +248,38 @@ app.post('/extract', async (req, res) => {
       }
 
       if (!version) {
-        const vMatch = rawBodyText.match(/\b(?:v|Version)[:\s]*([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))\b/i);
-        version = vMatch ? vMatch[1].trim() : '1.0.0';
+        const vMatch = rawBodyText.match(/\b(?:v|Version)[:\s]*([0-9]+(?:\.[0-9]+)*(?:[a-zA-Z0-9.-]*))\b/i);
+        version = vMatch ? vMatch[1].trim() : '3';
       }
       version = version.startsWith('v') ? version : `v${version}`;
 
       if (!size) {
-        const dlBtns = Array.from(document.querySelectorAll('a[href*="/download"], a.download_button, a.btn-download'));
-        for (const btn of dlBtns) {
-          const m = (btn.innerText || '').match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
-          if (m) {
-            let sVal = m[1].toUpperCase();
-            if (sVal.endsWith('M')) sVal += 'B';
-            if (sVal.endsWith('G')) sVal += 'B';
-            size = sVal;
-            break;
-          }
-        }
-      }
-
-      if (!size) {
-        const sm = rawBodyText.match(/\bSize[:\s]*([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
+        const sm = rawBodyText.match(/\bSize[:\s]*([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i) ||
+                   rawBodyText.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB))\b/i);
         if (sm) {
           let sVal = sm[1].toUpperCase();
           if (sVal.endsWith('M')) sVal += 'B';
           if (sVal.endsWith('G')) sVal += 'B';
           size = sVal;
         } else {
-          size = '185 MB';
+          size = '00 MB';
         }
       }
 
-      // ================= ৫. LAST UPDATE =================
+      // ================= ৮. LAST UPDATE & RATING =================
       let lastUpdated = '';
       const dateEl = document.querySelector('time, [itemprop="dateModified"], [itemprop="datePublished"], .updated, .last-update, [class*="date"]');
-      if (dateEl) {
-        lastUpdated = dateEl.getAttribute('datetime') || dateEl.innerText?.trim();
-      }
+      if (dateEl) lastUpdated = dateEl.getAttribute('datetime') || dateEl.innerText?.trim();
 
       if (!lastUpdated) {
-        const updateMatch = rawBodyText.match(/(?:Updated|Last Update|Update date|Обновлено)[:\s]*([A-Za-z]+ \d{1,2}, \d{4}|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}-\d{2}-\d{2})/i);
+        const updateMatch = rawBodyText.match(/(?:Updated|Last Update|Update date|Обновлено)[:\s]*([A-Za-z]+ \d{1,2},? \d{4}|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}-\d{2}-\d{2})/i);
         if (updateMatch) lastUpdated = updateMatch[1].trim();
       }
-
       if (!lastUpdated || lastUpdated.length > 25) {
         const today = new Date();
         lastUpdated = today.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
       }
 
-      // ================= ৬. RATING =================
       let rating = '';
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const s of scripts) {
@@ -236,45 +297,8 @@ app.post('/extract', async (req, res) => {
         if (rEl) rating = rEl.innerText?.trim();
       }
 
-      if (!rating) {
-        const m = rawBodyText.match(/\b([3-5]\.[0-9])\s*(?:\/|out of|\★|stars|ratings|votes)?/i);
-        if (m) rating = m[1];
-      }
-
       let numRating = parseFloat(rating);
-      rating = (!isNaN(numRating) && numRating >= 1 && numRating <= 5) ? numRating.toFixed(1) : '4.5';
-
-      // ================= ৭. ICON =================
-      let icon = '';
-      if (isLiteApks) {
-        const iconEl = document.querySelector('.app-icon img, .flex-shrink-0 img, .post-thumbnail img, [class*="icon"] img');
-        if (iconEl) icon = iconEl.getAttribute('data-src') || iconEl.getAttribute('data-lazy-src') || iconEl.getAttribute('src');
-      } else if (isAN1) {
-        const iconEl = document.querySelector('.app_view .img img, .app_spec .img img, .app-img img');
-        if (iconEl) icon = iconEl.getAttribute('data-src') || iconEl.getAttribute('data-original') || iconEl.getAttribute('src');
-      }
-
-      if (!icon || icon.includes('data:image')) {
-        icon = document.querySelector('meta[property="og:image"]')?.content ||
-               document.querySelector('meta[name="twitter:image"]')?.content ||
-               document.querySelector('link[rel="apple-touch-icon"]')?.href || '';
-      }
-
-      if (icon && !icon.startsWith('http')) {
-        try { icon = new URL(icon, targetUrl).href; } catch(e) {}
-      }
-
-      // ================= ৮. SCREENSHOTS =================
-      const screenshots = [];
-      const imgElements = document.querySelectorAll('.app_screens img, .screenshots img, .gallery-item img, [class*="screenshot"] img, [class*="gallery"] img');
-      imgElements.forEach(img => {
-        let src = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original') || img.getAttribute('src');
-        if (src && !screenshots.includes(src) && !src.includes('logo') && !src.includes('icon') && !src.includes('data:image')) {
-          try {
-            screenshots.push(new URL(src, targetUrl).href);
-          } catch(e) {}
-        }
-      });
+      rating = (!isNaN(numRating) && numRating >= 1 && numRating <= 5) ? numRating.toFixed(1) : '5.0';
 
       // ================= ৯. DOWNLOAD LINK =================
       let downloadUrl = targetUrl;
@@ -283,34 +307,8 @@ app.post('/extract', async (req, res) => {
         downloadUrl = dlAnchor.href;
       }
 
-      // ================= ১০. DESCRIPTION =================
-      let description = '';
-      if (isLiteApks) {
-        const contentBox = document.querySelector('.entry-content, article, .post-content, #description');
-        if (contentBox) {
-          const clone = contentBox.cloneNode(true);
-          clone.querySelectorAll('script, style, ins, .adsbygoogle, .download-btn, form').forEach(el => el.remove());
-          const elements = clone.querySelectorAll('p, li, h2, h3');
-          const lines = [];
-          elements.forEach(el => {
-            const txt = el.innerText?.trim();
-            if (txt && txt.length > 5 && !txt.includes('LiteApks') && !txt.includes('Download APK')) {
-              lines.push(txt);
-            }
-          });
-          description = lines.length > 0 ? lines.slice(0, 10).join('\n\n') : clone.innerText?.trim();
-        }
-      } else if (isAN1) {
-        const descBox = document.querySelector('.app_view .description, #description, .text');
-        if (descBox) description = descBox.innerText?.trim();
-      }
-
-      if (!description || description.length < 20) {
-        description = document.querySelector('meta[property="og:description"]')?.content || 'Tested and clean Android MOD APK release.';
-      }
-
       return {
-        name: name || 'Extracted Mod App',
+        name,
         modType,
         developer,
         category,
@@ -318,11 +316,11 @@ app.post('/extract', async (req, res) => {
         version,
         size,
         rating,
-        downloads: '500K+',
+        downloads: '50K+',
         icon: icon || 'https://upload.wikimedia.org/wikipedia/commons/d/d7/Android_robot.svg',
-        description: description.slice(0, 1500),
+        description,
         download: downloadUrl,
-        screenshots: screenshots.slice(0, 5)
+        screenshots: screenshots.slice(0, 6)
       };
     }, url);
 
