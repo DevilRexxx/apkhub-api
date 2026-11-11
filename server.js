@@ -31,6 +31,7 @@ app.post('/extract', async (req, res) => {
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
+    // বিজ্ঞাপন ও ভারী ফাইল ব্লক করা (শুধু HTML টেক্সট পড়বে)
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const type = req.resourceType();
@@ -64,12 +65,31 @@ app.post('/extract', async (req, res) => {
         .replace(/[-|•–].*$/, '')
         .trim();
 
-      // ================= ২. APK SIZE (Deep DOM & Table Inspector) =================
-      let size = '';
+      // ================= ২. APP VERSION =================
+      let version = '';
+      const specList = Array.from(document.querySelectorAll('tr, .spec-item, li, dt, dd, [class*="detail"], [class*="info"], [class*="spec"]'));
+      for (const el of specList) {
+        const inner = el.innerText || '';
+        if (/version|версия/i.test(inner)) {
+          const m = inner.match(/(?:v|version|ver)?[:\s]*([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))/i);
+          if (m) {
+            version = m[1].trim();
+            break;
+          }
+        }
+      }
 
-      // ক. টেবিল ও স্পেক কন্টেইনার সরাসরি চেক
-      const specElements = Array.from(document.querySelectorAll('tr, .spec-item, li, dt, dd, [class*="detail"], [class*="info"], [class*="spec"]'));
-      for (const el of specElements) {
+      if (!version) {
+        const titleTxt = document.title || '';
+        const vMatch = titleTxt.match(/\b(?:v|ver|version)[:\s]*([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))\b/i) ||
+                       (document.body ? document.body.innerText.match(/\b(?:v|Version)[:\s]*([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))\b/i) : null);
+        version = vMatch ? vMatch[1].trim() : '1.0.0';
+      }
+      version = version.startsWith('v') ? version : `v${version}`;
+
+      // ================= ৩. APK SIZE =================
+      let size = '';
+      for (const el of specList) {
         const inner = el.innerText || '';
         if (/size|размер/i.test(inner)) {
           const match = inner.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb))/i);
@@ -80,7 +100,6 @@ app.post('/extract', async (req, res) => {
         }
       }
 
-      // খ. ডাউনলোড বাটনের গায়ের টেক্সট স্ক্যান (যেমন: "Download (140MB)")
       if (!size) {
         const dlBtns = Array.from(document.querySelectorAll('a[href*="/download"], a.download_button, a.btn-download, [class*="download"]'));
         for (const btn of dlBtns) {
@@ -93,18 +112,15 @@ app.post('/extract', async (req, res) => {
         }
       }
 
-      // গ. পুরো পেজের র টেক্সট স্ক্যান
       if (!size) {
         const rawText = document.body ? document.body.innerText : '';
         const rawMatch = rawText.match(/\bSize[:\s]*([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb))\b/i) ||
                          rawText.match(/\b([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB))\b/i);
-        size = rawMatch ? rawMatch[1].toUpperCase() : '95 MB';
+        size = rawMatch ? rawMatch[1].toUpperCase() : '85 MB';
       }
 
-      // ================= ৩. STAR RATING (JSON-LD & DOM Inspector) =================
+      // ================= ৪. STAR RATING =================
       let rating = '';
-
-      // ক. JSON-LD Schema মেটাডাটা স্ক্যান (সবচেয়ে নিখুঁত রেটিং থাকে এখানে)
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const s of scripts) {
         try {
@@ -123,7 +139,6 @@ app.post('/extract', async (req, res) => {
         } catch(e) {}
       }
 
-      // খ. LiteApks ও AN1 রেটিং এলিমেন্ট
       if (!rating) {
         if (isLiteApks) {
           const rEl = document.querySelector('.post-ratings strong, .rating-value, span[itemprop="ratingValue"], .post-ratings span');
@@ -134,22 +149,20 @@ app.post('/extract', async (req, res) => {
         }
       }
 
-      // গ. স্ক্রিন টেক্সট রেটিং প্যাটার্ন (যেমন: 4.6 / 5)
       if (!rating) {
         const rawText = document.body ? document.body.innerText : '';
         const match = rawText.match(/\b([3-5]\.[0-9])\s*(?:\/|out of|\★|stars|ratings|votes)?/i);
         if (match) rating = match[1];
       }
 
-      // ১ ডেসিমেল ফরম্যাট ফিক্স করা (যেমন: 4.7)
       let numRating = parseFloat(rating);
       if (!isNaN(numRating) && numRating >= 1 && numRating <= 5) {
         rating = numRating.toFixed(1);
       } else {
-        rating = '4.7';
+        rating = '4.8';
       }
 
-      // ================= ৪. APP ICON =================
+      // ================= ৫. APP ICON =================
       let icon = '';
       if (isLiteApks) {
         const iconEl = document.querySelector('.app-icon img, .flex-shrink-0 img, .post-thumbnail img, [class*="icon"] img');
@@ -169,13 +182,13 @@ app.post('/extract', async (req, res) => {
         try { icon = new URL(icon, targetUrl).href; } catch(e) {}
       }
 
-      // ================= ৫. TOTAL DOWNLOADS =================
+      // ================= ৬. TOTAL DOWNLOADS =================
       let downloads = '';
       const fullText = document.body ? document.body.innerText : '';
       const dlMatch = fullText.match(/\b([0-9]+(?:\.[0-9]+)?[KkMmBb]\+?|[0-9,]{3,}\+?)\s*(?:Downloads|Installs|скачиваний)/i);
       downloads = dlMatch ? dlMatch[1] : '500K+';
 
-      // ================= ৬. DESCRIPTION & MOD FEATURES =================
+      // ================= ৭. DESCRIPTION & MOD FEATURES =================
       let description = '';
       if (isLiteApks) {
         const contentBox = document.querySelector('.entry-content, article, .post-content, #description');
@@ -204,7 +217,7 @@ app.post('/extract', async (req, res) => {
       }
       description = description.replace(/[ \t]+/g, ' ').slice(0, 1500);
 
-      // ================= ৭. SCREENSHOTS =================
+      // ================= ৮. SCREENSHOTS =================
       const screenshots = [];
       const imgElements = document.querySelectorAll('.app_screens img, .screenshots img, .gallery-item img, [class*="screenshot"] img, [class*="gallery"] img');
       imgElements.forEach(img => {
@@ -216,7 +229,7 @@ app.post('/extract', async (req, res) => {
         }
       });
 
-      // ================= ৮. DOWNLOAD LINK =================
+      // ================= ৯. DOWNLOAD LINK =================
       let downloadUrl = targetUrl;
       const dlAnchor = document.querySelector('a[href*="/download"], a.download_button, a.btn-download, a[class*="download"]');
       if (dlAnchor && dlAnchor.href) {
@@ -225,10 +238,11 @@ app.post('/extract', async (req, res) => {
 
       return {
         name: name || 'Extracted Mod App',
-        icon: icon || 'https://upload.wikimedia.org/wikipedia/commons/d/d7/Android_robot.svg',
+        version,
         size,
         rating,
         downloads,
+        icon: icon || 'https://upload.wikimedia.org/wikipedia/commons/d/d7/Android_robot.svg',
         description,
         download: downloadUrl,
         screenshots: screenshots.slice(0, 5)
