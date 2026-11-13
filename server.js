@@ -15,7 +15,6 @@ app.post('/extract', async (req, res) => {
   if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
 
   try {
-    // মোবাইল ব্রাউজার ফিংগারপ্রিন্ট ও হেডার ব্যবহার করে ক্লাউডফ্লেয়ার বাইপাস
     const response = await axios.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
@@ -82,26 +81,22 @@ app.post('/extract', async (req, res) => {
       try { icon = new URL(icon, url).href; } catch(e) {}
     }
 
-    // ৪. Version & Size
+    // ৪. Version & Exact Size Fix
     let version = schemaData.softwareVersion || '';
     let size = schemaData.fileSize || '';
 
-    $('tr, li, div, span, .spec-item').each((i, el) => {
-      const txt = $(el).text().trim();
-      if (!version && /\b(version)\b/i.test(txt) && txt.length < 40) {
-        const vm = txt.match(/([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))/);
-        if (vm) version = vm[1].trim();
-      }
-      if (!size && /\b(size)\b/i.test(txt) && txt.length < 40) {
-        const sm = txt.match(/([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
-        if (sm) {
+    if (!size) {
+      $('span, div, td, li').each((i, el) => {
+        const txt = $(el).text().trim();
+        const sm = txt.match(/^([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|M|G|Mb|Gb))\b/i);
+        if (sm && !size) {
           let sVal = sm[1].toUpperCase();
-          if (sVal.endsWith('M')) sVal += 'B';
-          if (sVal.endsWith('G')) sVal += 'B';
+          if (sVal.endsWith('M') && !sVal.endsWith('MB')) sVal += 'B';
+          if (sVal.endsWith('G') && !sVal.endsWith('GB')) sVal += 'B';
           size = sVal;
         }
-      }
-    });
+      });
+    }
 
     if (!version) {
       const vMatch = bodyText.match(/\b(?:v|Version)[:\s]*([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))\b/i);
@@ -110,27 +105,24 @@ app.post('/extract', async (req, res) => {
     version = version.startsWith('v') ? version : `v${version}`;
 
     if (!size) {
-      const sm = bodyText.match(/\bSize[:\s]*([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
+      const sm = bodyText.match(/\b([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|M|G))\b/i);
       size = sm ? sm[1].toUpperCase() : '120 MB';
-      if (size.endsWith('M')) size += 'B';
+      if (size.endsWith('M') && !size.endsWith('MB')) size += 'B';
     }
 
-    // ৫. Developer Name
+    // ৫. Developer Name Fix
     let developer = schemaData.author?.name || '';
     if (!developer) {
-      $('.post-info span, .app-info li, tr, .infotable li').each((i, el) => {
-        const t = $(el).text();
-        if (/developer|publisher|offered by/i.test(t)) {
-          const val = t.replace(/developer|publisher|offered by/gi, '').replace(/[:\n\r]/g, '').trim();
-          if (val && val.length < 35) developer = val;
-        }
-      });
+      const devEl = $('a[href*="/author/"], a[href*="/developer/"], .text-emerald-400, .info-author').first();
+      if (devEl.length) developer = devEl.text().trim();
     }
     if (!developer) {
-      const devM = bodyText.match(/(?:Developer|Offered by|Publisher)[:\s]*([A-Za-z0-9\s.,&'-]{2,30})/i);
+      const devM = bodyText.match(/(?:Developer|Offered by|Publisher)[:\s]*([A-Za-z0-9\s.,&'-]{2,25})/i);
       if (devM) developer = devM[1].trim();
     }
-    developer = developer && !developer.toLowerCase().includes('top android') ? developer : 'Verified Studio';
+    if (!developer || developer.length > 25 || developer.includes('REACHED')) {
+      developer = 'Verified Studio';
+    }
 
     // ৬. Category
     let category = schemaData.applicationCategory || '';
@@ -182,18 +174,42 @@ app.post('/extract', async (req, res) => {
       description = $('meta[property="og:description"]').attr('content') || 'Tested and clean Android MOD APK release with full features unlocked.';
     }
 
-    // ১০. Download Link
+    // ১০. Exact Download Link Fix
     let downloadUrl = url;
+    let foundDl = false;
+
     $('a').each((i, el) => {
       const href = $(el).attr('href') || '';
       const text = $(el).text().toLowerCase();
-      if (href.includes('/download/') || text.includes('download') || text.includes('apk')) {
+      const cls = $(el).attr('class') || '';
+
+      if (
+        cls.includes('download') ||
+        href.includes('/download/') ||
+        href.includes('file_get') ||
+        text.includes('download apk') ||
+        text.includes('download (') ||
+        text === 'download'
+      ) {
         try {
           downloadUrl = new URL(href, url).href;
+          foundDl = true;
           return false;
         } catch (e) {}
       }
     });
+
+    if (!foundDl) {
+      $('a').each((i, el) => {
+        const href = $(el).attr('href') || '';
+        if (href.endsWith('.apk') || href.includes('.apk?') || href.includes('dl.') || href.includes('files.')) {
+          try {
+            downloadUrl = new URL(href, url).href;
+            return false;
+          } catch (e) {}
+        }
+      });
+    }
 
     res.json({
       success: true,
