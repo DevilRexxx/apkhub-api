@@ -15,7 +15,6 @@ app.post('/extract', async (req, res) => {
   if (!url) return res.status(400).json({ success: false, error: 'URL is required' });
 
   try {
-    // সরাসরি পেজের HTML রিকোয়েস্ট (মাত্র ০.৩ সেকেন্ড সময় নেয়)
     const response = await axios.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -64,7 +63,7 @@ app.post('/extract', async (req, res) => {
       } catch(e) {}
     }
 
-    // ৩. APP ICON (আসল ইমেজ সোর্স তোলা)
+    // ৩. APP ICON
     let icon = '';
     if (schemaData.image) {
       icon = typeof schemaData.image === 'string' ? schemaData.image : (schemaData.image.url || '');
@@ -135,7 +134,7 @@ app.post('/extract', async (req, res) => {
     const titleLower = ($('title').text() || '').toLowerCase();
     const modType = titleLower.includes('premium') ? 'PREMIUM' : (titleLower.includes('pro') ? 'PRO' : 'MOD');
 
-    // ৭. SCREENSHOTS (গ্যালারি ইমেজ সংগ্রহ)
+    // ৭. SCREENSHOTS
     const screenshots = [];
     $('.app_screens img, .screenshots img, .gallery img, [class*="screenshot"] img, [class*="gallery"] img').each((i, el) => {
       let src = $(el).attr('data-src') || $(el).attr('data-lazy-src') || $(el).attr('src');
@@ -163,11 +162,52 @@ app.post('/extract', async (req, res) => {
       description = $('meta[property="og:description"]').attr('content') || 'Clean verified Android package.';
     }
 
-    // ৯. DOWNLOAD URL
+    // ৯. ফাইনাল DIRECT APK DOWNLOAD LINK বের করা (LiteApks & AN1 উভয়ের জন্য)
     let downloadUrl = url;
-    const dlBtn = $('a[href*="/download"], a.download_button, a.btn-download').first();
-    if (dlBtn.length && dlBtn.attr('href')) {
-      try { downloadUrl = new URL(dlBtn.attr('href'), url).href; } catch(e) {}
+    let intermediateUrl = '';
+
+    $('a').each((i, el) => {
+      const href = $(el).attr('href') || '';
+      const text = $(el).text().toLowerCase();
+      if (href.includes('/download/') || href.includes('file_get') || text.includes('download apk') || text.includes('download (')) {
+        try {
+          intermediateUrl = new URL(href, url).href;
+          return false;
+        } catch (e) {}
+      }
+    });
+
+    if (intermediateUrl) {
+      downloadUrl = intermediateUrl;
+      try {
+        const dlPageRes = await axios.get(intermediateUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Referer': url
+          },
+          timeout: 8000
+        });
+
+        const $dl = cheerio.load(dlPageRes.data);
+
+        $dl('a').each((i, el) => {
+          const finalHref = $dl(el).attr('href') || '';
+          if (
+            finalHref.endsWith('.apk') ||
+            finalHref.endsWith('.xapk') ||
+            finalHref.includes('.apk?') ||
+            finalHref.includes('dl.liteapks') ||
+            finalHref.includes('files.liteapks') ||
+            finalHref.includes('files.an1') ||
+            finalHref.includes('cdn.')
+          ) {
+            downloadUrl = new URL(finalHref, intermediateUrl).href;
+            return false;
+          }
+        });
+      } catch (subErr) {
+        console.log('Sub-page fetch skipped:', subErr.message);
+      }
     }
 
     res.json({
