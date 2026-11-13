@@ -44,10 +44,29 @@ app.post('/extract', async (req, res) => {
       } catch (e) {}
     });
 
-    // ২. App Name
-    let name = schemaData.name || $('h1.entry-title, h1.text-2xl, h1').first().text().trim();
-    if (!name) name = $('meta[property="og:title"]').attr('content') || '';
+    // ২. Raw Title & MOD Features বের করা
+    const rawH1 = $('h1.entry-title, h1.text-2xl, h1').first().text().trim() || $('meta[property="og:title"]').attr('content') || '';
+    
+    let modFeatures = '';
+    // পেজের ভেতরে থাকা "MOD: ..." টেক্সট খোঁজা
+    $('p, div, span, em, strong').each((i, el) => {
+      const txt = $(el).text().trim();
+      if (/^MOD(?:\s*Info|\s*Features)?\s*:/i.test(txt) && txt.length < 150) {
+        modFeatures = txt.replace(/^MOD(?:\s*Info|\s*Features)?\s*:\s*/i, '').trim();
+        return false;
+      }
+    });
 
+    // যদি সেখানে না পাওয়া যায়, তবে H1 টাইটেলের ব্র্যাকেটের ভেতর থেকে নেওয়া (যেমন: (Unlimited All, Max Level))
+    if (!modFeatures) {
+      const bracketMatch = rawH1.match(/\(([^)]+)\)/);
+      if (bracketMatch && bracketMatch[1]) {
+        modFeatures = bracketMatch[1].trim();
+      }
+    }
+
+    // ৩. App Name পরিষ্কার করা
+    let name = schemaData.name || rawH1;
     name = name
       .replace(/\b(liteapks\.com|liteapks|an1\.com|an1|\.com)\b/gi, '')
       .replace(/\b(MOD APK|MOD|APK|Unlimited Money|Everything|Free Download|for Android)\b/gi, '')
@@ -65,7 +84,7 @@ app.post('/extract', async (req, res) => {
       } catch(e) { name = 'Android App'; }
     }
 
-    // ৩. App Icon
+    // ৪. App Icon
     let icon = '';
     if (schemaData.image) {
       icon = typeof schemaData.image === 'string' ? schemaData.image : (schemaData.image.url || '');
@@ -81,7 +100,7 @@ app.post('/extract', async (req, res) => {
       try { icon = new URL(icon, url).href; } catch(e) {}
     }
 
-    // ৪. Version & Exact Size Fix
+    // ৫. Version & Exact Size
     let version = schemaData.softwareVersion || '';
     let size = schemaData.fileSize || '';
 
@@ -110,7 +129,7 @@ app.post('/extract', async (req, res) => {
       if (size.endsWith('M') && !size.endsWith('MB')) size += 'B';
     }
 
-    // ৫. Developer Name Fix
+    // ৬. Developer Name
     let developer = schemaData.author?.name || '';
     if (!developer) {
       const devEl = $('a[href*="/author/"], a[href*="/developer/"], .text-emerald-400, .info-author').first();
@@ -124,20 +143,23 @@ app.post('/extract', async (req, res) => {
       developer = 'Verified Studio';
     }
 
-    // ৬. Category
+    // ৭. Category
     let category = schemaData.applicationCategory || '';
-    if (!category) {
+    if (!category || category === 'GameApplication' || category === 'SoftwareApplication') {
       const crumbs = [];
-      $('.breadcrumb a, nav[class*="bread"] a, .breadcrumbs a').each((i, el) => crumbs.push($(el).text().trim()));
-      if (crumbs.length >= 2) category = crumbs[crumbs.length - 2];
+      $('.breadcrumb a, nav[class*="bread"] a, .breadcrumbs a, a[href*="/games/"], a[href*="/apps/"]').each((i, el) => {
+        const t = $(el).text().trim();
+        if (t && !['home', 'games', 'apps'].includes(t.toLowerCase())) crumbs.push(t);
+      });
+      if (crumbs.length > 0) category = crumbs[0];
     }
-    category = category && !['home', 'apps', 'games'].includes(category.toLowerCase()) ? category : 'Action Games';
+    if (!category || category === 'GameApplication') category = 'Action Games';
 
-    // ৭. Mod Type
+    // ৮. Mod Type
     const titleLower = ($('title').text() || '').toLowerCase();
     const modType = titleLower.includes('premium') ? 'PREMIUM' : (titleLower.includes('pro') ? 'PRO' : 'MOD');
 
-    // ৮. Screenshots
+    // ৯. Screenshots
     const screenshots = [];
     $('img').each((i, el) => {
       let src = $(el).attr('data-src') || $(el).attr('data-lazy-src') || $(el).attr('src');
@@ -158,7 +180,7 @@ app.post('/extract', async (req, res) => {
       }
     });
 
-    // ৯. Description
+    // ১০. Description + MOD Features একসাথে যুক্ত করা
     let description = '';
     const contentBox = $('.entry-content, article, .post-content, #description').first();
     if (contentBox.length) {
@@ -166,7 +188,9 @@ app.post('/extract', async (req, res) => {
       const lines = [];
       contentBox.find('p, li').each((i, el) => {
         const t = $(el).text().trim();
-        if (t && t.length > 15 && !t.includes('LiteApks') && !lines.includes(t)) lines.push(t);
+        if (t && t.length > 15 && !t.includes('LiteApks') && !/^MOD\s*:/i.test(t) && !lines.includes(t)) {
+          lines.push(t);
+        }
       });
       description = lines.slice(0, 10).join('\n\n');
     }
@@ -174,7 +198,12 @@ app.post('/extract', async (req, res) => {
       description = $('meta[property="og:description"]').attr('content') || 'Tested and clean Android MOD APK release with full features unlocked.';
     }
 
-    // ১০. Exact Download Link Fix
+    // ডেসক্রিপশনের শুরুতে MOD Features বসিয়ে দেওয়া
+    if (modFeatures) {
+      description = `🔥 MOD FEATURES: ${modFeatures}\n\n${description}`;
+    }
+
+    // ১১. Exact Download Link
     let downloadUrl = url;
     let foundDl = false;
 
@@ -216,6 +245,7 @@ app.post('/extract', async (req, res) => {
       data: {
         name,
         modType,
+        modFeatures: modFeatures || 'Unlocked / Modded',
         developer,
         category,
         lastUpdated: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
