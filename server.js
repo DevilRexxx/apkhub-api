@@ -83,7 +83,7 @@ app.post('/extract', async (req, res) => {
     let version = schemaData.softwareVersion || '';
     let size = schemaData.fileSize || '';
 
-    $('tr, li, div, .spec-item').each((i, el) => {
+    $('tr, li, div, span, .spec-item').each((i, el) => {
       const txt = $(el).text().trim();
       if (!version && /\b(version)\b/i.test(txt) && txt.length < 40) {
         const vm = txt.match(/([0-9]+(?:\.[0-9]+)+(?:[a-zA-Z0-9.-]*))/);
@@ -108,18 +108,28 @@ app.post('/extract', async (req, res) => {
 
     if (!size) {
       const sm = bodyText.match(/\bSize[:\s]*([0-9]+(?:\.[0-9]+)?\s*(?:MB|GB|KB|Mb|Gb|M|G)\b)/i);
-      size = sm ? sm[1].toUpperCase() : '85 MB';
+      size = sm ? sm[1].toUpperCase() : '120 MB';
       if (size.endsWith('M')) size += 'B';
     }
 
-    // ৫. DEVELOPER & CATEGORY
-    let developer = schemaData.author?.name || $('a[href*="/developer/"], a[href*="/author/"], .app-author').first().text().trim();
+    // ৫. DEVELOPER (উন্নত পার্সিং)
+    let developer = schemaData.author?.name || '';
     if (!developer) {
-      const devM = bodyText.match(/(?:Developer|Offered by)[:\s]*([A-Za-z0-9\s.,&'-]+)/i);
-      if (devM && devM[1].trim().length < 35) developer = devM[1].trim();
+      $('.post-info span, .app-info li, tr, .infotable li').each((i, el) => {
+        const t = $(el).text();
+        if (/developer|publisher|offered by/i.test(t)) {
+          const val = t.replace(/developer|publisher|offered by/gi, '').replace(/[:\n\r]/g, '').trim();
+          if (val && val.length < 30) developer = val;
+        }
+      });
     }
-    if (!developer) developer = 'Top Verified Studio';
+    if (!developer) {
+      const devM = bodyText.match(/(?:Developer|Offered by|Publisher)[:\s]*([A-Za-z0-9\s.,&'-]{2,30})/i);
+      if (devM) developer = devM[1].trim();
+    }
+    if (!developer || developer.toLowerCase().includes('top android')) developer = 'Verified Studio';
 
+    // ৬. CATEGORY
     let category = schemaData.applicationCategory || '';
     if (!category) {
       const crumbs = [];
@@ -130,46 +140,60 @@ app.post('/extract', async (req, res) => {
       category = 'Action Games';
     }
 
-    // ৬. MOD TYPE
+    // ৭. MOD TYPE
     const titleLower = ($('title').text() || '').toLowerCase();
     const modType = titleLower.includes('premium') ? 'PREMIUM' : (titleLower.includes('pro') ? 'PRO' : 'MOD');
 
-    // ৭. SCREENSHOTS
+    // ৮. SCREENSHOTS (LiteApks ও AN1 গ্যালারি ফিক্স)
     const screenshots = [];
-    $('.app_screens img, .screenshots img, .gallery img, [class*="screenshot"] img, [class*="gallery"] img').each((i, el) => {
+    $('img').each((i, el) => {
       let src = $(el).attr('data-src') || $(el).attr('data-lazy-src') || $(el).attr('src');
-      if (src && !src.includes('data:image') && !src.includes('logo') && !src.includes('icon')) {
+      const cls = $(el).attr('class') || '';
+      const parentCls = $(el).parent().attr('class') || '';
+      
+      if (
+        src && 
+        !src.includes('data:image') && 
+        !src.includes('logo') && 
+        !src.includes('icon') &&
+        !src.includes('avatar') &&
+        (cls.includes('screen') || cls.includes('gallery') || parentCls.includes('screen') || parentCls.includes('gallery') || parentCls.includes('owl') || src.includes('/uploads/posts/'))
+      ) {
         try {
           const abs = new URL(src, url).href;
-          if (!screenshots.includes(abs)) screenshots.push(abs);
+          if (!screenshots.includes(abs) && screenshots.length < 6) {
+            screenshots.push(abs);
+          }
         } catch(e) {}
       }
     });
 
-    // ৮. DESCRIPTION
+    // ৯. DESCRIPTION & MOD FEATURES
     let description = '';
-    const contentBox = $('.entry-content, article, .post-content, #description').first();
+    const contentBox = $('.entry-content, article, .post-content, #description, .content').first();
     if (contentBox.length) {
-      contentBox.find('script, style, ins, form, iframe').remove();
+      contentBox.find('script, style, ins, form, iframe, header, footer').remove();
       const lines = [];
-      contentBox.find('p, li').each((i, el) => {
+      contentBox.find('p, li, span').each((i, el) => {
         const t = $(el).text().trim();
-        if (t && t.length > 10 && !t.includes('LiteApks')) lines.push(t);
+        if (t && t.length > 15 && !t.includes('LiteApks') && !t.includes('AN1') && !lines.includes(t)) {
+          lines.push(t);
+        }
       });
-      description = lines.slice(0, 10).join('\n\n');
+      description = lines.slice(0, 12).join('\n\n');
     }
     if (!description) {
-      description = $('meta[property="og:description"]').attr('content') || 'Clean verified Android package.';
+      description = $('meta[property="og:description"]').attr('content') || 'Tested and clean Android MOD APK release with full features unlocked.';
     }
 
-    // ৯. ফাইনাল DIRECT APK DOWNLOAD LINK বের করা (LiteApks & AN1 উভয়ের জন্য)
+    // ১০. DIRECT DOWNLOAD LINK (মধ্যবর্তী পেজ ও ফাইনাল ফাইল লিংক ফিক্স)
     let downloadUrl = url;
     let intermediateUrl = '';
 
     $('a').each((i, el) => {
       const href = $(el).attr('href') || '';
       const text = $(el).text().toLowerCase();
-      if (href.includes('/download/') || href.includes('file_get') || text.includes('download apk') || text.includes('download (')) {
+      if (href.includes('/download/') || href.includes('file_get') || text.includes('download') || text.includes('apk')) {
         try {
           intermediateUrl = new URL(href, url).href;
           return false;
@@ -185,47 +209,42 @@ app.post('/extract', async (req, res) => {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Referer': url
           },
-          timeout: 8000
+          timeout: 6000
         });
 
         const $dl = cheerio.load(dlPageRes.data);
-
         $dl('a').each((i, el) => {
           const finalHref = $dl(el).attr('href') || '';
           if (
             finalHref.endsWith('.apk') ||
             finalHref.endsWith('.xapk') ||
             finalHref.includes('.apk?') ||
-            finalHref.includes('dl.liteapks') ||
-            finalHref.includes('files.liteapks') ||
-            finalHref.includes('files.an1') ||
-            finalHref.includes('cdn.')
+            finalHref.includes('dl.') ||
+            finalHref.includes('files.')
           ) {
             downloadUrl = new URL(finalHref, intermediateUrl).href;
             return false;
           }
         });
-      } catch (subErr) {
-        console.log('Sub-page fetch skipped:', subErr.message);
-      }
+      } catch (subErr) {}
     }
 
     res.json({
       success: true,
       data: {
-        name: name || 'Contra Native',
+        name: name || 'Android Game',
         modType,
-        developer,
+        developer: developer || 'Verified Publisher',
         category,
         lastUpdated: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
         version,
         size,
-        rating: schemaData.aggregateRating?.ratingValue?.toString() || '4.8',
+        rating: schemaData.aggregateRating?.ratingValue?.toString() || '4.5',
         icon: icon || 'https://upload.wikimedia.org/wikipedia/commons/d/d7/Android_robot.svg',
         description: description.slice(0, 1500),
         download: downloadUrl,
         downloadUrl,
-        screenshots: screenshots.slice(0, 6)
+        screenshots: screenshots.length > 0 ? screenshots : ['https://placehold.co/400x225/111b33/10b981?text=Preview+1', 'https://placehold.co/400x225/111b33/06b6d4?text=Preview+2']
       }
     });
 
